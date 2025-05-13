@@ -24,6 +24,9 @@ ytdl_opts = {
     'format': 'bestaudio/best',
     'noplaylist': True,
     'quiet': True,
+    # 'cookiefile': os.getenv('LOCAL_URL'),  # 쿠키 파일 경로 (본인 서버에 맞게 수정)
+    'cookiefile': os.getenv('SERVER_URL'),  # 쿠키 파일 경로 (본인 서버에 맞게 수정)
+    'nocheckcertificate': True,  # (선택) 인증서 에러 방지용
     'source_address': '0.0.0.0'  # IPv6 방지
 }
 ffmpeg_opts = {
