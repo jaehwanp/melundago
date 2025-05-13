@@ -7,11 +7,15 @@ import yt_dlp
 import os
 import random
 from discord import File
-import openai
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+from dotenv import load_dotenv
+load_dotenv()
+YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")  # .env 파일에 YOUTUBE_API_KEY=your_key 형식으로 작성
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -22,40 +26,70 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 ytdl_opts = {
     'format': 'bestaudio/best',
-    'noplaylist': True,
+    'noplaylist': False,
     'quiet': True,
     # 'cookiefile': os.getenv('LOCAL_URL'),  # 쿠키 파일 경로 (본인 서버에 맞게 수정)
-    'cookiefile': os.getenv('SERVER_URL'),  # 쿠키 파일 경로 (본인 서버에 맞게 수정)
-    'nocheckcertificate': True,  # (선택) 인증서 에러 방지용
-    'source_address': '0.0.0.0'  # IPv6 방지
+    # 'cookiefile': os.getenv('SERVER_URL'),  # 쿠키 파일 경로 (본인 서버에 맞게 수정)
+    'source_address': '0.0.0.0'
 }
+
 ffmpeg_opts = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
     'options': '-vn'
 }
 
 song_queue = {}
+autoplay_enabled = {}
+last_played_url = {}
 playing_status = {}
 voice_clients = {}
 
-def get_youtube_url(search):
+def get_youtube_urls(search):
     with yt_dlp.YoutubeDL(ytdl_opts) as ydl:
         try:
-            info = ydl.extract_info(f"ytsearch:{search}", download=False)
-            return info['entries'][0]['url'], info['entries'][0]['title']
+            if not search.startswith("http"):
+                search = f"ytsearch:{search}"
+            info = ydl.extract_info(search, download=False)
+            if 'entries' not in info:
+                return [(info['url'], info['title'])]
+            return [(entry['url'], entry['title']) for entry in info['entries'] if entry]
         except Exception as e:
-            print(f"[ERROR] 유튜브 검색 실패: {e}")
-            return None, None
+            print(f"[ERROR] 유튜브 링크 추출 실패: {e}")
+            return []
+
+def get_related_video_url(video_url):
+    try:
+        if "watch?v=" not in video_url:
+            return None
+        video_id = video_url.split("watch?v=")[1].split("&")[0]
+        api_url = (
+            f"https://www.googleapis.com/youtube/v3/search"
+            f"?part=snippet&type=video&maxResults=5&relatedToVideoId={video_id}&key={YOUTUBE_API_KEY}"
+        )
+        response = requests.get(api_url)
+        if response.status_code == 403:
+            print("[ERROR] YouTube API 무료 할당량 초과")
+            return "quota_exceeded"
+        data = response.json()
+        items = data.get("items", [])
+        if not items:
+            return None
+        related_video_id = items[0]["id"]["videoId"]
+        return f"https://www.youtube.com/watch?v={related_video_id}"
+    except Exception as e:
+        print(f"[ERROR] API 관련곡 검색 실패: {e}")
+        return None
 
 async def play_next(ctx, guild_id):
     if song_queue[guild_id]:
         url, title = song_queue[guild_id].pop(0)
         try:
             source = await discord.FFmpegOpusAudio.from_probe(url, **ffmpeg_opts)
+            last_played_url[guild_id] = url
         except Exception as e:
             await ctx.send(f"❗ 음악 스트림 오류: {e}")
             print(f"[ERROR] 스트리밍 오류: {e}")
-            await play_next(ctx, guild_id)  # 다음 곡 재시도
+            await play_next(ctx, guild_id)
             return
 
         vc = voice_clients[guild_id]
@@ -72,6 +106,19 @@ async def play_next(ctx, guild_id):
         vc.play(source, after=after_play)
         await ctx.send(f"🎵 재생 중: **{title}**")
     else:
+        if autoplay_enabled.get(guild_id, False) and last_played_url.get(guild_id):
+            next_url = get_related_video_url(last_played_url[guild_id])
+            if next_url == "quota_exceeded":
+                await ctx.send("❌ YouTube API 무료 할당량을 모두 사용했습니다. 자동재생이 중단됩니다.")
+                autoplay_enabled[guild_id] = False
+                return
+            if next_url:
+                song_queue[guild_id].append((next_url, "Auto: Related Video"))
+                await ctx.send("🔁 관련 곡을 자동으로 재생합니다.")
+                await play_next(ctx, guild_id)
+                return
+            else:
+                await ctx.send("⚠️ 관련곡을 찾을 수 없습니다. 자동재생 종료.")
         playing_status[guild_id] = False
         if voice_clients[guild_id].is_connected():
             await voice_clients[guild_id].disconnect()
@@ -84,17 +131,17 @@ async def play(ctx, *, search):
         return
 
     guild_id = ctx.guild.id
-    url, title = get_youtube_url(search)
-
-    if not url:
+    tracks = get_youtube_urls(search)
+    if not tracks:
         await ctx.send("❌ 유튜브에서 노래를 찾을 수 없습니다.")
         return
 
     song_queue.setdefault(guild_id, [])
     playing_status.setdefault(guild_id, False)
 
-    song_queue[guild_id].append((url, title))
-    await ctx.send(f"✅ 대기열에 추가됨: **{title}**")
+    for url, title in tracks:
+        song_queue[guild_id].append((url, title))
+    await ctx.send(f"✅ {len(tracks)}곡 대기열에 추가됨.")
 
     if not playing_status[guild_id]:
         try:
@@ -102,10 +149,24 @@ async def play(ctx, *, search):
             vc = await channel.connect(reconnect=True, timeout=60)
             voice_clients[guild_id] = vc
             playing_status[guild_id] = True
+            last_played_url[guild_id] = tracks[0][0]
             await play_next(ctx, guild_id)
         except Exception as e:
             await ctx.send(f"❌ 음성 채널 연결 실패: {e}")
             print(f"[ERROR] 연결 실패: {e}")
+
+@bot.command()
+async def autoplay(ctx, mode: str = None):
+    guild_id = ctx.guild.id
+    if mode == "on":
+        autoplay_enabled[guild_id] = True
+        await ctx.send("🔁 자동 관련 음악 재생이 **활성화**되었습니다.")
+    elif mode == "off":
+        autoplay_enabled[guild_id] = False
+        await ctx.send("⏹ 자동 관련 음악 재생이 **비활성화**되었습니다.")
+    else:
+        status = autoplay_enabled.get(guild_id, False)
+        await ctx.send(f"📢 자동재생 상태: {'켜짐 🔁' if status else '꺼짐 ⛔'}\n`!autoplay on` 또는 `!autoplay off` 로 설정하세요.")
 
 @bot.command()
 async def queue(ctx):
@@ -181,13 +242,18 @@ async def _r(ctx):
 async def _st(ctx):
     await stop(ctx)
 
+
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
         return
 
-    for guild_id, vc in voice_clients.items():
-        if vc.is_connected() and len(vc.channel.members) == 1:
+    guild_id = member.guild.id
+    vc = voice_clients.get(guild_id)
+
+    if vc and vc.is_connected():
+        # 봇이 혼자 남았는지 확인
+        if len(vc.channel.members) == 1:
             await vc.disconnect()
             playing_status[guild_id] = False
             song_queue[guild_id] = []
@@ -242,4 +308,5 @@ async def help_command(ctx):
 """
     await ctx.send(help_text)
 
-bot.run(os.getenv('DISCORD_BOT_TOKEN'))  # <-- 여기에 실제 토큰을 넣어야 합니다
+bot.run(os.getenv('DISCORD_BOT_TOKEN'))
+#bot.run("")  # <-- 여기에 실제 토큰을 넣어야 합니다
