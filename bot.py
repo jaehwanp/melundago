@@ -29,7 +29,7 @@ ytdl_opts = {
     'noplaylist': False,
     'quiet': True,
     # 'cookiefile': os.getenv('LOCAL_URL'),  # 쿠키 파일 경로 (본인 서버에 맞게 수정)
-    # 'cookiefile': os.getenv('SERVER_URL'),  # 쿠키 파일 경로 (본인 서버에 맞게 수정)
+    'cookiefile': os.getenv('SERVER_URL'),  # 쿠키 파일 경로 (본인 서버에 맞게 수정)
     'source_address': '0.0.0.0'
 }
 
